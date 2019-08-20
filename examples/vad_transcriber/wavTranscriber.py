@@ -2,6 +2,7 @@ import glob
 import webrtcvad
 import logging
 import wavSplit
+import os
 from deepspeech import Model
 from timeit import default_timer as timer
 
@@ -28,7 +29,8 @@ def load_model(models, alphabet, lm, trie):
     logging.debug("Loaded model in %0.3fs." % (model_load_end))
 
     lm_load_start = timer()
-    ds.enableDecoderWithLM(alphabet, lm, trie, LM_ALPHA, LM_BETA)
+    if lm and trie:
+        ds.enableDecoderWithLM(alphabet, lm, trie, LM_ALPHA, LM_BETA)
     lm_load_end = timer() - lm_load_start
     logging.debug('Loaded language model in %0.3fs.' % (lm_load_end))
 
@@ -72,11 +74,12 @@ def resolve_models(dirName):
     alphabet = glob.glob(dirName + "/alphabet.txt")[0]
     logging.debug("Found Alphabet: %s" % alphabet)
 
-    lm = glob.glob(dirName + "/lm.binary")[0]
-    trie = glob.glob(dirName + "/trie")[0]
-    logging.debug("Found Language Model: %s" % lm)
-    logging.debug("Found Trie: %s" % trie)
-
+    lm = glob.glob(dirName + "/lm.binary")[0] if os.path.isfile(dirName + "/lm.binary") else None
+    trie = glob.glob(dirName + "/trie")[0] if os.path.isfile(dirName + "/trie") else None
+    if lm is not None:
+      logging.debug("Found Language Model: %s" % lm)
+    if trie is not None:
+      logging.debug("Found Trie: %s" % trie)
     return pb, alphabet, lm, trie
 
 '''
@@ -99,5 +102,14 @@ def vad_segment_generator(wavFile, aggressiveness):
     frames = wavSplit.frame_generator(30, audio, sample_rate)
     frames = list(frames)
     segments = wavSplit.vad_collector(sample_rate, 30, 300, vad, frames)
+    return segments, sample_rate, audio_length, frames
 
-    return segments, sample_rate, audio_length
+def vad_equal_segment_generator(wavFile, ms=30):
+    logging.debug("Caught the wav file @: %s" % (wavFile))
+    audio, sample_rate, audio_length = wavSplit.read_wave(wavFile)
+    assert sample_rate == 16000, "Only 16000Hz input WAV files are supported for now!"
+    frames = wavSplit.frame_generator(ms, audio, sample_rate)
+    frames = list(frames)
+    segments = [frame.bytes for frame in frames]
+    return segments, sample_rate, audio_length, frames
+

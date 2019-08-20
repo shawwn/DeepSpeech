@@ -47,22 +47,39 @@ def main(args):
 
         # Run VAD on the input file
         waveFile = args.audio
-        segments, sample_rate, audio_length = wavTranscriber.vad_segment_generator(waveFile, args.aggressive)
-        f = open(waveFile.rstrip(".wav") + ".txt", 'w')
+        #segments, sample_rate, audio_length, frames = wavTranscriber.vad_segment_generator(waveFile, args.aggressive)
+        #segments, sample_rate, audio_length, frames = wavTranscriber.vad_equal_segment_generator(waveFile, ms=30*9)
+        segments, sample_rate, audio_length, frames = wavTranscriber.vad_equal_segment_generator(waveFile, ms=30)
+        sctx = model_retval[0].setupStream()
         logging.debug("Saving Transcript @: %s" % waveFile.rstrip(".wav") + ".txt")
+        transcript = ''
+        rate=16000
+        audio_total=0.0
 
         for i, segment in enumerate(segments):
             # Run deepspeech on the chunk that just completed VAD
-            logging.debug("Processing chunk %002d" % (i,))
             audio = np.frombuffer(segment, dtype=np.int16)
-            output = wavTranscriber.stt(model_retval[0], audio, sample_rate)
-            inference_time += output[1]
-            logging.debug("Transcript: %s" % output[0])
+            audio_length = len(audio) * (1 / rate)
+            audio_total += audio_length
+            #logging.debug("Processing chunk %002d (%0.3fs)" % (i,audio_length))
+            #output = wavTranscriber.stt(model_retval[0], audio, sample_rate)
+            model_retval[0].feedAudioContent(sctx, audio)
+            #if i % (3*9) == 0:
+            if i % 3 == 0:
+            #if i % 1 == 0:
+                #inference_time += output[1]
+                transcript2 = model_retval[0].intermediateDecode(sctx)
+                if transcript != transcript2:
+                    transcript = transcript2
+                    logging.debug("Processing chunk %002d (%0.3fs / %002d) Transcript: %s" % (i, audio_length, len(audio), transcript))
 
-            f.write(output[0] + " ")
+        #transcript = model_retval[0].intermediateDecode(sctx)
+        transcript = model_retval[0].finishStream(sctx)
+        logging.debug("Finished (%0.3fs) Transcript: %s" % (audio_total, transcript))
+        with open(waveFile.rstrip(".wav") + ".txt", 'w') as f:
+          f.write(transcript + "\n")
 
         # Summary of the files processed
-        f.close()
 
         # Extract filename from the full file path
         filename, ext = os.path.split(os.path.basename(waveFile))
@@ -73,17 +90,50 @@ def main(args):
         print("%-30s %-20.3f %-20.3f %-20.3f %-0.3f" % (filename + ext, audio_length, inference_time, model_retval[1], model_retval[2]))
     else:
         sctx = model_retval[0].setupStream()
+        model_retval[0].feedAudioContent(sctx, np.frombuffer(b'\x00'*512, np.int16))
         subproc = subprocess.Popen(shlex.split('rec -q -V0 -e signed -L -c 1 -b 16 -r 16k -t raw - gain -2'),
                                    stdout=subprocess.PIPE,
                                    bufsize=0)
         print('You can start speaking now. Press Control-C to stop recording.')
 
         try:
+            i = 0
+            last_frame = i
+            last_total = 0.0
+            audio_total = 0.0
+            transcript = ' '
+            rate = 16000
             while True:
-                data = subproc.stdout.read(512)
-                model_retval[0].feedAudioContent(sctx, np.frombuffer(data, np.int16))
+                data = subproc.stdout.read(2048)
+                audio = np.frombuffer(data, np.int16)
+                audio_length = len(audio) * (1 / rate)
+                last_total += audio_length
+                audio_total += audio_length
+                model_retval[0].feedAudioContent(sctx, audio)
+                should_log = False
+                if i % 1 == 0:
+                    if last_total > 1.5 and not transcript.endswith(' ') and transcript != '':
+                        logging.debug('Resetting stream')
+                        transcript = model_retval[0].finishStream(sctx)
+                        sctx = model_retval[0].setupStream()
+                        last_total = 0.0
+                        should_log = True
+                    transcript2 = model_retval[0].intermediateDecode(sctx)
+                    if transcript != transcript2:
+                        last_frame = i
+                        last_total = 0.0
+                        transcript = transcript2
+                        should_log = True
+                    if int(audio_total) != int(audio_total - audio_length):
+                        should_log = True
+                if should_log:
+                    logging.debug("Processing chunk %002d (%0.3fs / %002d) Transcript: %s" % (i, audio_length, len(audio), repr(transcript)))
+                i = i + 1
         except KeyboardInterrupt:
-            print('Transcription: ', model_retval[0].finishStream(sctx))
+            transcript = model_retval[0].finishStream(sctx)
+            sys.stdout.write('Transcription: %s\n\n' % transcript)
+            sys.stdout.flush()
+            #print('Transcription: ', trans)
             subproc.terminate()
             subproc.wait()
 
